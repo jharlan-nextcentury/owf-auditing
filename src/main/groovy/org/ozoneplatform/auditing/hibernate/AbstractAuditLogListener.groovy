@@ -4,8 +4,10 @@ import org.apache.log4j.Logger
 import org.hibernate.FlushMode
 import org.hibernate.Session
 import org.hibernate.SessionFactory
+import org.hibernate.event.service.spi.EventListenerRegistry
 import org.hibernate.event.spi.*
 import org.hibernate.event.spi.LoadEventListener.LoadType
+import org.hibernate.internal.SessionFactoryImpl
 import org.hibernate.type.BinaryType
 import org.hibernate.type.CollectionType
 import org.hibernate.type.Type
@@ -25,29 +27,45 @@ abstract class AbstractAuditLogListener implements PostDeleteEventListener, Post
 	protected SessionFactory sessionFactory
 	
 	private static final def FIELDS_TO_IGNORE = ['editedDate','editedBy','createdDate','createdBy','version']
-	
 
-    public void setSessionFactory(SessionFactory sessionFactory) {
+    void setSessionFactory(SessionFactory sessionFactory) {
         this.sessionFactory = sessionFactory
 
-        ['postDelete', 'postInsert', 'postUpdate', 'load'].each { type ->
-            registerSelfWithListeners(type)
+        registerSelfWithListeners([
+            EventType.POST_DELETE,
+            EventType.POST_INSERT,
+            EventType.POST_UPDATE,
+            EventType.LOAD
+        ])
+    }
+
+    protected void registerSelfWithListeners(Collection<EventType<?>> types) {
+        getEventListenerRegistry()
+            .orElseThrow({-> new RuntimeException ("Unable to get EventListenerRegistry")})
+            .with { registry -> types.each { registry.getEventListenerGroup(it).appendListener(this) } }
+    }
+
+    private Optional<EventListenerRegistry> getEventListenerRegistry() {
+        getHibernateSessionFactory()
+                .flatMap { Optional.ofNullable(it.serviceRegistry) }
+                .flatMap { Optional.ofNullable(it.getService(EventListenerRegistry)) }
+    }
+
+    private Optional<SessionFactoryImpl> getHibernateSessionFactory() {
+        if (!(sessionFactory instanceof SessionFactoryImpl)) {
+            log.warn("Unknown SessionFactory implementation: ${sessionFactory.class.canonicalName}")
+            return Optional.empty()
         }
+
+        Optional.ofNullable((SessionFactoryImpl) sessionFactory)
     }
 
-    protected void registerSelfWithListeners(type) {
-        def listeners = sessionFactory.eventListeners."${type}EventListeners" as List
-        listeners << this
-		log.debug "Loading listener ${type}EventListeners"
-        sessionFactory.eventListeners."${type}EventListeners" = listeners as Object[]
-    }
+    @Override
+    public void onLoad(LoadEvent event, LoadType type) {
 
-	@Override
-	public void onLoad(LoadEvent event, LoadType type) {
-		
-		if(type != LoadEventListener.GET)
-			return;
-			
+        if(type != LoadEventListener.GET)
+            return;
+
         String entityClassName = event.entityClassName ?: ""
 		
         if(!isAccessAuditable(entityClassName))
